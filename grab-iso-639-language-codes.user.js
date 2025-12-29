@@ -3,8 +3,8 @@
 // @name		Grab ISO 639 language codes
 // @description	
 // @version		1.0.0
-// @downloadURL	url
-// @updateURL	url
+// @downloadURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
+// @updateURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
 // @namespace	BP
 // @author		Benjamin Philipp <dev [at - please don't spam] benjamin-philipp.com>
 // @include		https://iso639-3.sil.org/code_tables/639/data*
