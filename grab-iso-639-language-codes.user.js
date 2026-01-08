@@ -422,7 +422,7 @@ Entries are keyed by their ISO ${k} codes
 					if(withComments)
 						comment = `Dictionary [ISO ${k} => Language name] with ${Object.keys(vals).length} entries as of ${date}
 from ${sourceUrl}
-using ${scriptUrl}s`;
+using ${scriptUrl}`;
 					suffix = "_simple";
 				}
 				else{
