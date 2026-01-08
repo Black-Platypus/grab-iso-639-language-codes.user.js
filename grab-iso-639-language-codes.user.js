@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name		Grab ISO 639 language codes
 // @description	
-// @version		1.0.0
+// @version		1.1.0
 // @downloadURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
 // @updateURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
 // @namespace	BP
@@ -24,7 +24,7 @@
 
 const logger = new BPLogger(GM_info.script.name);
 const {log, warn, error, success} = logger;
-const modal = bpModal();
+const modal = bpModal("light");
 
 const sels = {
 	table: "#block-system-main>.view-code-tables>.view-content table.views-table",
@@ -32,9 +32,10 @@ const sels = {
 	paginationNext: "li.pager-next>a"
 };
 
+const sourceUrl = "https://iso639-3.sil.org/code_tables/639/data/all";
+const scriptUrl = "https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js";
 const urlTemplate = "https://iso639-3.sil.org/code_tables/639/data/all?items_per_page=500&page=%d";
 
-// const preferBib = false; // Prefer Bibliographical over terminilogical codes? https://en.wikipedia.org/wiki/ISO_639-2#B_and_T_codes
 const keepDeprecated = false;
 
 const codes = ["639-1", "639-2", "639-3"];
@@ -46,6 +47,30 @@ const cols = {
 	scope: {column: 4, label: "Scope"},
 	type: {column: 5, label: "Language Type"}
 };
+
+// Some of the results are duplicated, like there is a clone for the 639-2/B code, sorted as if the 639-3 had the 639-2/B as its value
+const knownDupes = [
+	"ces",
+	"eus",
+	"fra",
+	"deu",
+	"ell",
+	"hye",
+	"isl",
+	"kat",
+	"mkd",
+	"mri",
+	"msa",
+	"mya",
+	"nld",
+	"fas",
+	"ron",
+	"slk",
+	"sqi",
+	"bod",
+	"cym",
+	"zho"
+];
 
 {GM_addStyle(`
 	#bp-floatButtons{
@@ -104,6 +129,22 @@ const cols = {
 		font-size: 80%;
 		padding: 0.25em 0.5em;
 	}
+	.bp-resultOptions>label{
+		margin-right: 0.5em;
+	}
+	
+	.nowrap{
+		white-space: nowrap;
+	}
+	span.counter.row{
+		white-space: nowrap;
+		break-before: avoid;
+		margin: 0;
+	}
+	span.counter.row::before,
+	span.counter.row::after{
+		content: none;
+	}
 	
 	.progress.marquee{
 		background: linear-gradient(-45deg, #bdf, #38c, #bdf, #38c, #bdf);
@@ -119,30 +160,67 @@ const cols = {
 			background-position: 00% 000%;
 		}
 	}
+	
+	.bp-collapse{
+		
+	}
+	.bp-collapse>div{
+	}
+	.bp-collapse>.bp-collapse-wrapper{
+		display: grid;
+		grid-template-rows: 0fr;
+		transition: grid-template-rows 0.3s ease-out;
+	}
+	.bp-collapse.open>.bp-collapse-wrapper{
+		grid-template-rows: 1fr;
+	}
+	.bp-collapse>.bp-collapse-wrapper>.bp-collapse-container{
+		overflow: hidden;
+	}
+	.bp-collapse .bp-collapse-title{
+		cursor: pointer;
+	}
+	.bp-collapse .bp-collapse-title::after{
+		content: " ▼";
+		opacity: 0.5;
+	}
+	.bp-collapse .bp-collapse-title:hover::after{
+		opacity: 1;
+	}
+	.bp-collapse.open .bp-collapse-title::after{
+		content: " ▲";
+	}
 `);
 } // Styles. In block to make it collapsable in TM Editor
 
 const btRex = /639-2\/([BT]):\s*(\w+)/i;
+
+let isOnlyPage, isComplete, isSubset, isCustom, customUrl;
 
 function main(){
 	waitFor(sels.table, function(o){
 		let menu = $("<div id='bp-floatButtons'></div>").appendTo("body");
 		let getPageButton = $("<div class='bp-button' title='Get all data from current page'>Get all on page</div>").appendTo(menu).click((ev)=>{
 			// log("get all on page");
+			errors = [];
 			let res = getFromTable(o);
 			log("result:", res);
 			
-			// Check in on alt names
+			// Test: Check in on alt names
 			// let multiName = Object.values(res).filter(v=>v.names_other.length>0);
 			// log("Multiple names:", multiName);
+			// addError("Test", "toast", o[0]);
 			
+			isOnlyPage = true;
+			customUrl = location.href;
+			isSubset = true;
 			resultDialog(res);
 		});
-		let getAllButton = $("<div class='bp-button'>Get all</div>").appendTo(menu).click(async (ev)=>{
-			
+		let getAllButton = $("<div class='bp-button' title='Ctrl: start from this page (including filters)'>Get all</div>").appendTo(menu).click(async (ev)=>{
+			// log("get all");
 			let progDiag = $(`<div class='progDiag'>
-				<p>Loading page <span class='counter page'>1</span></p>
-				<p>Found rows: <span class='counter row'>0</span></p>
+				<p class='nowrap'>Loading page <span class='counter page'>1</span></p>
+				<p class='nowrap'>Found rows: <span class='counter row'>0</span></p>
 				<div class='progress marquee'></div>
 			</div>`);
 			let counters = {
@@ -150,70 +228,164 @@ function main(){
 				row: progDiag.find("span.counter.row")
 			}
 			let diag;
-			let controller = getAll((res, err)=>{
-				log("result all:", res, err);
-				//diag.close();
+			let controller;
+			progDiag.append("<button class='bp-button'>Cancel</button>").click(()=>{
+				isComplete = false;
+				controller.cancel();
+			});
+			diag = modal.msg(progDiag);
+			
+			nextUrl = urlTemplate.replace("%d", 0);
+			
+			isCustom = ev.ctrlKey;
+			if(isCustom){
+				nextUrl = location.href;
+				customUrl = location.href;
+			}
+			const url = new URL(nextUrl);
+			url.searchParams.set("items_per_page", 500);
+			url.searchParams.set("page", 0);
+			nextUrl = url.toString();
+			
+			isComplete = true;
+			isSubset = false;
+			isOnlyPage = false;
+			if(isCustom){
+				if(! url.pathname.match("/data/all"))
+					isSubset = true;
+				else {
+					for(let filterKey in filterFields){
+						if(isSubset)
+							break;
+						let filter = filterFields[filterKey];
+						let defValue = filter.default.toLowerCase();
+						let v = url.searchParams.get(filterKey);
+						if(!v)
+							continue;
+						if(v.toLowerCase() != defValue){
+							log(`${filterKey} is not default '${defValue}':`, v);
+							isSubset = true;
+							break;
+						}
+					}
+				}
+			}
+			// return msg("Is subset? " + (isSubset ? "Yes" : "No"));
+			
+			controller = getAll((res, err)=>{
+				// log("result all:", res, err);
+				diag.close();
 				resultDialog(res);
 			}, (data)=>{
 				const {page, rows, lastRow} = data;
 				counters.page.text(page + 1);
 				counters.row.text(rows);
-			});
-			progDiag.append("<button class='bp-button'>Cancel</button>").click(()=>{
-				controller.cancel();
-			});
-			diag = modal.msg(progDiag);
+			}, diag);
 		});
 	}); //, cbFail=null, findIn="document", delay=500, maxTries=50, alwaysOn=false, debug = false
-	{
-	// 	GM_xmlhttpRequest({
-	// 		method: "GET",
-	// 		url: url,
-	// 		onload: function(res){
-	// 			let r = res.response;
-	// 			let t = res.responseText;
-	// 			log(res, r, t);
-	// 		}
-	// 	});
-	// 	GM_openInTab(url, {
-	// 		active: true,
-	// 		insert: true,
-	// 		parent: true
-	// 	});
-	// 	GM_download({
-	// 		url: url,
-	// 		name: name,
-	// 		saveAs: false,
-	// 		onerror: function(e){
-	// 			error("Error:", e);
-	// 		},
-	// 		onload: function(){
-	// 			success("Downloaded");
-	// 		}
-	// 	});
-	// 	saveAs(url, name, dir, cbOrPromise=true, cbErr=false, ifExist="ask");
-	} // Things I keep forgetting
-	
-	exposeAll({$, log, warn, error, sels});
-	bpVars.unpackNew(true);
 }
 
-function resultDialog(res, errors){
+const filterFields = {
+	title: {
+		name: "title",
+		label: "Identifier",
+		short: "title",
+		default: ""
+	},
+	name_3: {
+		name: "name_3",
+		label: "Language Name(s) containing",
+		short: "names",
+		default: ""
+	},
+	field_iso639_cd_st_mmbrshp_639_1_tid: {
+		name: "field_iso639_cd_st_mmbrshp_639_1_tid",
+		label: "Code Set",
+		short: "set",
+		default: "All"
+	},
+	field_iso639_element_scope_tid: {
+		name: "field_iso639_element_scope_tid",
+		label: "Scope",
+		short: "scope",
+		default: "All"
+	},
+	field_iso639_language_type_tid: {
+		name: "field_iso639_language_type_tid",
+		label: "Language Type",
+		short: "type",
+		default: "All"
+	}
+};
+
+function resultDialog(res){
 	let dlg;
 	let els = $("<div class='bp-resultOptions'><h2>Got data: " + (res).length + " rows</h2></div>");
 	let pretty = $("<input id='resultPretty' type='checkbox' checked='checked' />").prependTo($("<label for='resultPretty'> Pretty print</label>").appendTo(els));
+	let includeComments = $("<input id='withComments' type='checkbox' checked='checked' />").prependTo($("<label for='withComments'> Include comments</label>").appendTo(els));
 	// els.append("<br />");
 	let tbl = $(`<table>`).appendTo(els);
 	let keyed = {};
 	let simple = {};
+	let date = dateString(null, "YYYY-MM-DD");
+	let skipped = {};
+	let filterSuffix = "";
+	
+	if(isOnlyPage || isCustom){
+		let url = new URL(customUrl);
+		let m = url.pathname.match(/\/data\/(\w+)/);
+		if(m[1] != "all")
+			filterSuffix += sanitizeSuffix(m[1]);
+		
+		for(let filterKey in filterFields){
+			let filter = filterFields[filterKey];
+			let defValue = filter.default.toLowerCase();
+			let v = url.searchParams.get(filterKey);
+			if(!v)
+				continue;
+			if(v.toLowerCase() != defValue){
+				// log(`${filterKey} is not default '${defValue}':`, v);
+				filterSuffix += "-" + filter.short + "=" + sanitizeSuffix(v);
+			}
+		}
+		
+		if(isOnlyPage){
+			let page = url.searchParams.get("page");
+			if(!page)
+				page = "0";
+			filterSuffix += "-page=" + page;
+		}
+	}
+	// log({filterSuffix});
+	
 	for(let k of codes){
 		keyed[k] = {};
 		simple[k] = {};
+		skipped[k] = {};
 		let vals = res.filter(v=>!!v[k]);
 		for(let val of vals){
+			let existing = keyed[k][val[k]];
+			if(existing){
+				if(!skipped[k][val[k]])
+					skipped[k][val[k]] = [structuredClone(existing)];
+				log("adding skipped val:", jsPretty(val));
+				skipped[k][val[k]].push(structuredClone(val));
+			}
+			
+			// if(val.fromPage)
+			// 	delete val.fromPage;
+			
 			keyed[k][val[k]] = val;
+			
 			simple[k][val[k]] = val.name;
 		}
+		
+		vals = vals.map((val)=>{
+			if(val.fromPage)
+				delete val.fromPage;
+			return val;
+		});
+		let ovals = structuredClone(vals);
 		let row = $("<tr><td class='codeScope'><span class='name'>" + k + "</span><br />(" + vals.length + " items)</td>").appendTo(tbl);
 		let safeKey = k.replace(/[^a-zA-Z0-9]/g, "-");
 		let td = $("<td class='objType'>").appendTo(row);
@@ -225,32 +397,64 @@ function resultDialog(res, errors){
 		
 		td = $("<td class='buttons'>").appendTo(row);
 		
-		let getText = function(){
+		let prepare = function(){
+			let suffix = "";
+			let comment = "";
 			let isPretty = pretty.is(":checked");
 			let isObject = asObject.is(":checked");
 			let isSimple = asSimpleObject.is(":checked");
-			let vals = keyed[k];
-			if(!isObject){
-				if(isSimple)
-					vals = simple[k];
-				else
-					vals = Object.values(vals);
+			let withComments = includeComments.is(":checked");
+			
+			// log("Prepare: closure context:", {k, asObject, isObject});
+			
+			if(isObject){
+				vals = keyed[k];
+				if(withComments)
+					comment = `ISO ${k} language codes: Object with ${Object.keys(vals).length} entries as of ${date}
+from ${sourceUrl}
+using ${scriptUrl}
+Entries are keyed by their ISO ${k} codes
+(Entries without an ISO ${k} code are omitted)`;
 			}
-			log({k, isPretty, isObject, vals});
-			return JSON.stringify(vals, undefined, isPretty ? "\t" : undefined);
+			else{
+				if(isSimple){
+					vals = simple[k];
+					if(withComments)
+						comment = `Dictionary [ISO ${k} => Language name] with ${Object.keys(vals).length} entries as of ${date}
+from ${sourceUrl}
+using ${scriptUrl}s`;
+					suffix = "_simple";
+				}
+				else{
+					if(withComments)
+						comment = `ISO ${k} language codes: Array with all ${ovals.length} entries as of ${date}
+from ${sourceUrl}
+using ${scriptUrl}
+(Entries without an ISO ${k} code are omitted)`;
+					suffix = "_array";
+					vals = ovals;
+				}
+			}
+			
+			let text = (withComments ? commentFrame(comment) + "\n" : "") + JSON.stringify(vals, undefined, isPretty ? "\t" : undefined);
+			
+			suffix += filterSuffix;
+			// log("Prepared:", {k, isPretty, isObject, returns: {text, suffix}, values: {vals, ovals}});
+			return {text, suffix};
 		}
 		
 		$("<button class='bp-button'>Copy</button>").appendTo(td).click(()=>{
-			const str = `/* ${k} language codes */\n` + getText();
+			const str = prepare().text;
 			GM_setClipboard(str);
 			// dlg.close();
 		});
 		// $("<br />").appendTo(td);
-		$("<button class='bp-button' title='Ctrl: Ask for location'>Download</button>").appendTo(td).click((ev)=>{
-			const str = getText();
+		$("<button class='bp-button download' title='Ctrl: Ask for location'>Download</button>").appendTo(td).click((ev)=>{
+			const prep = prepare();
+			let withComments = includeComments.is(":checked");
 			GM_download({
-				url: "data:application/octet-stream," + encodeURIComponent(str),
-				name: safeKey + "-language_codes.json",
+				url: "data:application/octet-stream," + encodeURIComponent(prep.text),
+				name: "ISO_" + safeKey + "-language_codes" + prep.suffix + ".json" + (withComments ? "c" : ""),
 				saveAs: ev.ctrlKey,
 				onerror: function(e){
 					error(e);
@@ -263,16 +467,65 @@ function resultDialog(res, errors){
 			// dlg.close();
 		});
 	}
+	let skippedNum = 0;
+	skipped["639-2"] = {};
+	// log("before:", jsPretty(skipped));
+	for(let k in skipped){
+		let v = skipped[k];
+		let c = 0;
+		for(let _ in Object.keys(v))
+			c++;
+		skippedNum += c;
+		if(c<=0)
+			delete skipped[k];
+	}
+	// log("after:", jsPretty(skipped));
+	
+	if(skippedNum){
+		let skippedMsg = $(`<div class='bp-collapse borderTop msg warn'>
+		<div class='bp-collapse-title'>The following entries have been skipped (overwritten) for keyed objects:</div>`);
+		$("<div class='bp-collapse-container pre'></div>").appendTo($("<div class='bp-collapse-wrapper pre'>").appendTo(skippedMsg)).html(jsPretty(skipped, true));
+		warn("Skipped (overwritten) object entries:", skipped);
+		skippedMsg.appendTo($("<div class='bpMessageStyles'>").appendTo(els));
+	}
+	if(errors?.length){
+		msgError("test");
+		let errorsMsg = $(`<div class='bp-collapse borderTop msg error'>
+		<div class='bp-collapse-title'>The following errors occurred:</div>`);
+		$("<div class='bp-collapse-container pre'></div>").appendTo($("<div class='bp-collapse-wrapper pre'>").appendTo(errorsMsg)).html(jsPretty(errors, true));
+		error("Errors occurred:", errors);
+		errorsMsg.appendTo($("<div class='bpMessageStyles'>").appendTo(els));
+	}
+	
+	res = res.map((val)=>{
+		if(val.fromPage)
+			delete val.fromPage;
+		return val;
+	});
+	
+	const mainComment = commentFrame(`ISO 639 language codes: Array of${(isComplete && !isOnlyPage) ? " all" : ""} ${res.length} entries as of ${date}
+from ${sourceUrl}
+using ${scriptUrl}
+Each entry will have at least one of 639-1, 639-2 or 639-3.
+639-2/B: Bibliographic use instead of Terminological use.
+  In practice, /B usually refers to the English name; /T to the endonym.
+  /T is used as the default, where applicable.
+  see https://en.wikipedia.org/wiki/ISO_639-2#B_and_T_codes`);
+	
 	$("<button class='bp-button'>Copy all</button>").appendTo(els).click(()=>{
-		const str = JSON.stringify(res, undefined, pretty.is(":checked") ? "\t" : undefined);
+		let withComments = includeComments.is(":checked");
+		const comment = withComments ? mainComment + "\n" : "";
+		const str = comment + JSON.stringify(res, undefined, pretty.is(":checked") ? "\t" : undefined);
 		GM_setClipboard(str);
 		// dlg.close();
 	});
-	$("<button class='bp-button' title='Ctrl: Ask for location'>Download all</button>").appendTo(els).click((ev)=>{
-		const str = JSON.stringify(res, undefined, pretty.is(":checked") ? "\t" : undefined);
+	const dlAll = $("<button class='bp-button' title='Ctrl: Ask for location'>Download all</button>").appendTo(els).click((ev)=>{
+		let withComments = includeComments.is(":checked");
+		const comment = withComments ? mainComment + "\n" : "";
+		const str = comment + JSON.stringify(res, undefined, pretty.is(":checked") ? "\t" : undefined);
 			GM_download({
 				url: "data:application/octet-stream," + encodeURIComponent(str),
-				name: "language_codes.json",
+				name: "ISO_639-language_codes" + filterSuffix + ".json" + (withComments ? "c" : ""),
 				saveAs: ev.ctrlKey,
 				onerror: function(e){
 					error(e);
@@ -284,10 +537,52 @@ function resultDialog(res, errors){
 			});
 		// dlg.close();
 	});
+	$("<button class='bp-button' title='Download all variants as individual files'>Download all variants</button>").appendTo(els).click(async (ev)=>{
+		await tbl.find("tr").asyncEachWait(async (i,e)=>{
+			let dlb = $(e).find("button.bp-button.download");
+			await $(e).find("input[type='radio']").asyncEachWait(async (ii,ie)=>{
+				$(ie).prop("checked", true);
+				await bpWait(400);
+				// log("dl on", dlb, "for", ie);
+				dlb.click();
+				await bpWait(100);
+			});
+		});
+		dlAll.click();
+		// dlg.close();
+	});
 	dlg = modal.msg(els);
 }
 
-function getFromTable(tables){
+function sanitizeSuffix(str, strict=false){
+	if(strict)
+		return trimm(str).replace(/[^a-zA-Z0-9]/g, "_");
+	return sanitize(trimm(str), false)
+		.replace(/[\s-]+/g, "_");
+}
+
+$(document).on("click", ".bp-collapse .bp-collapse-title", (ev)=>{
+	let cont = $(ev.target).closest(".bp-collapse");
+	cont.toggleClass("open");
+});
+
+function commentFrame(str, minLength=0){
+	let lines = str.split(/\r?\n/g);
+	for(let l of lines)
+		if(l.length>minLength) minLength=l.length;
+	for(let i=0; i<lines.length; i++){
+		let l = lines[i];
+		let diff = minLength - l.length;
+		if(diff>0)
+			l += " ".repeat(diff);
+		lines[i] = " * " + l + " *"
+	}
+	return "/" + "*".repeat(minLength+4) + "\n" + lines.join("\n") + "\n " + "*".repeat(minLength+4) + "/";
+}
+
+let haveDupes = [];
+
+function getFromTable(tables, additionalData){
 	let ret = [];
 	tables.each((i,e)=>{
 		let table = $(e);
@@ -328,6 +623,12 @@ function getFromTable(tables){
 					break;
 				}
 				let v = $(td).textBr().trim();
+				if(k == "639-3"){
+					if(haveDupes.includes(v)){
+						log("skip dupe:", v);
+						return;
+					}
+				}
 				if(k=="name"){
 					if(!v)
 						v = "undefined";
@@ -356,7 +657,7 @@ function getFromTable(tables){
 						if(m){
 							if(! keepDeprecated){
 								warn("skipping deprecated entry:", k, m[1], nextUrl);
-								return;
+								continue;
 							}
 							v = m[1];
 						}
@@ -383,6 +684,13 @@ function getFromTable(tables){
 					}
 				}
 				row[k] = v;
+				
+				if(k == "639-3"){
+					if(knownDupes.includes(v)){
+						haveDupes.push(v);
+						// log("have known dupe:", v, haveDupes);
+					}
+				}
 			}
 			if(!ok)
 				return false;
@@ -392,6 +700,8 @@ function getFromTable(tables){
 			// if(ret[key])
 			// 	warn("Key already exists:", key);
 			// ret[key] = row;
+			if(additionalData)
+				Object.assign(row, additionalData);
 			ret.push(row);
 			// if(row.names_other.length){
 			// 	log("first multi result:", row, e);
@@ -404,17 +714,28 @@ function getFromTable(tables){
 
 let crawlPage = 0;
 let errors = [];
+// let nextUrl = location.href;
 let nextUrl = urlTemplate.replace("%d", crawlPage);
 
 function addError(err, ...args){
-	errors.push([err, {page: crawlPage, url: nextUrl}, ...args]);
+	error(err, ...args);
+	let obj = {error: err, page: crawlPage, url: nextUrl};
+	let includeArgs = args.filter(arg=>{
+		if(arg instanceof Element)
+			return false;
+		if(arg instanceof jQuery)
+			return false;
+		return true;
+	});
+	if(includeArgs.length)
+		obj.args = includeArgs;
+	errors.push(obj);
 }
 
 function getAll(cb, onUpdate, interval=1000){
 	crawlPage=0;
 	errors = [];
 	
-	nextUrl = urlTemplate.replace("%d", crawlPage);
 	let requestCancel = false;
 	let r = {cancel: function(){
 		requestCancel = true;
@@ -442,11 +763,12 @@ function getAll(cb, onUpdate, interval=1000){
 						let pagNext = cont.find(sels.pagination + " " + sels.paginationNext);
 						if(! table?.length){
 							let err = ["Could not find table in document:", cont, t];
-							error(...err);
+							// error(...err);
 							addError(...err);
 							resolve(false);
 						}
-						let rows = getFromTable(table);
+						
+						let rows = getFromTable(table, {fromPage: nextUrl});
 						if(rows?.length){
 							results.push(...rows);
 							if(! pagNext?.length)
@@ -456,7 +778,7 @@ function getAll(cb, onUpdate, interval=1000){
 						}
 						else{
 							let err = ["Could not ret rows from table:", table, t];
-							error(...err);
+							// error(...err);
 							addError(...err);
 							resolve(false);
 						}
@@ -467,7 +789,7 @@ function getAll(cb, onUpdate, interval=1000){
 						resolve(true);
 					},
 					onerror: function(err){
-						error(err);
+						// error(err);
 						addError(err);
 						nextUrl = false;
 						resolve(false);
@@ -488,4 +810,4 @@ setTimeout(main, 0);
 /* 2025-09-10 */
 /* eslint-env browser, es6 */
 /* eslint no-trailing-spaces: 0, curly: 0, no-redeclare: 0 */
-/* globals $, unsafeWindow, GM_config, escape, uneval, BPLogger, BPLogger_default, log, error, warn, getParam, waitFor, bpMenu, bpModal, escapeHtml, saveText, localTask, msg, saveAs, encodeBase64, jsPretty, sanitize, expose, exposeAll, getMatches, bpVars: true, msgSuccess, msgError, msgWarn, bpFloatContainer, bpWait */
+/* globals $, unsafeWindow, GM_config, escape, uneval, BPLogger, BPLogger_default, log, error, warn, getParam, waitFor, bpMenu, bpModal, escapeHtml, saveText, localTask, msg, saveAs, encodeBase64, jsPretty, sanitize, expose, exposeAll, getMatches, bpVars: true, msgSuccess, msgError, msgWarn, bpFloatContainer, bpWait, dateString */
