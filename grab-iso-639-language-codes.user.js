@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name		Grab ISO 639 language codes
 // @description	
-// @version		1.1.0
+// @version		1.1.1
 // @downloadURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
 // @updateURL	https://github.com/Black-Platypus/grab-iso-639-language-codes.user.js/raw/refs/heads/main/grab-iso-639-language-codes.user.js
 // @namespace	BP
@@ -242,6 +242,8 @@ function main(){
 				nextUrl = location.href;
 				customUrl = location.href;
 			}
+			else
+				customUrl = sourceUrl;
 			const url = new URL(nextUrl);
 			url.searchParams.set("items_per_page", 500);
 			url.searchParams.set("page", 0);
@@ -330,11 +332,12 @@ function resultDialog(res){
 	let date = dateString(null, "YYYY-MM-DD");
 	let skipped = {};
 	let filterSuffix = "";
-	
+	let page = "0";
+	let url = new URL(sourceUrl);
 	if(isOnlyPage || isCustom){
-		let url = new URL(customUrl);
+		url = new URL(customUrl);
 		let m = url.pathname.match(/\/data\/(\w+)/);
-		if(m[1] != "all")
+		if(m && (m[1] != "all"))
 			filterSuffix += sanitizeSuffix(m[1]);
 		
 		for(let filterKey in filterFields){
@@ -350,13 +353,16 @@ function resultDialog(res){
 		}
 		
 		if(isOnlyPage){
-			let page = url.searchParams.get("page");
-			if(!page)
+			page = url.searchParams.get("page");
+			if(!page){
 				page = "0";
+				url.searchParams.set("page", page);
+			}
 			filterSuffix += "-page=" + page;
+			log("Is only page:", page);
 		}
 	}
-	// log({filterSuffix});
+	log({filterSuffix, isOnlyPage, page, customUrl, url});
 	
 	for(let k of codes){
 		keyed[k] = {};
@@ -404,14 +410,15 @@ function resultDialog(res){
 			let isObject = asObject.is(":checked");
 			let isSimple = asSimpleObject.is(":checked");
 			let withComments = includeComments.is(":checked");
+			log({filterSuffix, isOnlyPage, page});
 			
 			// log("Prepare: closure context:", {k, asObject, isObject});
 			
 			if(isObject){
 				vals = keyed[k];
 				if(withComments)
-					comment = `ISO ${k} language codes: Object with ${Object.keys(vals).length} entries as of ${date}
-from ${sourceUrl}
+					comment = `ISO ${k} language codes: Object with${(isComplete && !isOnlyPage) ? " all" : ""} ${Object.keys(vals).length} entries as of ${date}
+from ${url}
 using ${scriptUrl}
 Entries are keyed by their ISO ${k} codes
 (Entries without an ISO ${k} code are omitted)`;
@@ -420,15 +427,15 @@ Entries are keyed by their ISO ${k} codes
 				if(isSimple){
 					vals = simple[k];
 					if(withComments)
-						comment = `Dictionary [ISO ${k} => Language name] with ${Object.keys(vals).length} entries as of ${date}
-from ${sourceUrl}
+						comment = `Dictionary [ISO ${k} => Language name] with${(isComplete && !isOnlyPage) ? " all" : ""} ${Object.keys(vals).length} entries as of ${date}
+from ${url}
 using ${scriptUrl}`;
 					suffix = "_simple";
 				}
 				else{
 					if(withComments)
-						comment = `ISO ${k} language codes: Array with all ${ovals.length} entries as of ${date}
-from ${sourceUrl}
+						comment = `ISO ${k} language codes: Array with${(isComplete && !isOnlyPage) ? " all" : ""} ${ovals.length} entries as of ${date}
+from ${url}
 using ${scriptUrl}
 (Entries without an ISO ${k} code are omitted)`;
 					suffix = "_array";
@@ -502,9 +509,9 @@ using ${scriptUrl}
 			delete val.fromPage;
 		return val;
 	});
-	
+	log({isComplete, isOnlyPage});
 	const mainComment = commentFrame(`ISO 639 language codes: Array of${(isComplete && !isOnlyPage) ? " all" : ""} ${res.length} entries as of ${date}
-from ${sourceUrl}
+from ${url}
 using ${scriptUrl}
 Each entry will have at least one of 639-1, 639-2 or 639-3.
 639-2/B: Bibliographic use instead of Terminological use.
